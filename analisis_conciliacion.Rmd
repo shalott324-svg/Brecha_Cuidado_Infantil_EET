@@ -1,0 +1,253 @@
+---
+title: "La Brecha Invisible: Análisis de la carga de cuidados por sexo en España"
+subtitle: "Impacto del empleo y el servicio doméstico mediante microdatos del INE"
+author: "Olga Ocaña Mozos"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+
+library(tidyverse)
+```
+
+## 1.Introducción
+Este proyecto de investigación analiza cómo el sexo y la situación laboral influyen en la distribución del tiempo dedicado al cuidado de niños en España. A través de los microdatos de la Encuesta de Empleo del Tiempo, exploramos si la externalización de servicios (servicio doméstico) logra mitigar la brecha existente.
+
+## 2. Metodología
+Para el análisis se han integrado cuatro fuentes de datos principales:
+
+1. MHOGAR: Variables demográficas y sexo.
+
+2. DIARIO2: Registro de actividades en intervalos de 10 minutos (Código 938: Cuidados de niños).
+
+3. CINDIV: Situación laboral (Ocupados vs. No ocupados).
+
+4. SD: Presencia de servicio doméstico pagado en el hogar.
+
+Los datos se han ponderado utilizando el Factor de Elevación (FACTORF) para representar fielmente a la población española.
+
+```{r analisis, include=FALSE}
+
+# 2. LEER LOS DATOS DEL FICHERO DE MICRODATOS
+# 2.1. LEER PERSONAS (MHOGAR)
+especificacion_mhogar <- fwf_cols(
+  IDHOGAR  = c(1, 5),   
+  NPERS    = c(6, 7),   
+  SEXO     = c(8, 8),   
+  EDAD     = c(15, 17)
+)
+mhogar_limpio <- read_fwf("C:/Users/shalo/OneDrive/Documents/Capstone Google/empleo_del_tiempo_0910/MHOGAR.txt", col_positions = especificacion_mhogar, col_types = cols(.default = "c")) %>%
+  mutate(SEXO = if_else(SEXO == "6", "Mujer", "Varón"))
+
+# 2.2. LEER DIARIO (DIARIO2)
+especificacion_diario <- fwf_cols(
+  IDHOGAR   = c(1, 5),   
+  NPERS     = c(6, 7),   
+  APRIN     = c(13, 15), 
+  FACTORF   = c(29, 44)
+)
+diario2 <- read_fwf("C:/Users/shalo/OneDrive/Documents/Capstone Google/empleo_del_tiempo_0910/DIARIO2.txt", col_positions = especificacion_diario, col_types = cols(.default = "c"))
+
+# 2.3. LEER TRABAJO (CINDIV)
+especificacion_cindiv <- fwf_cols(
+  IDHOGAR  = c(1, 5),   
+  NPERS    = c(6, 7),   
+  TRABAJO  = c(8, 8)
+)
+cindiv_limpio <- read_fwf("C:/Users/shalo/OneDrive/Documents/Capstone Google/empleo_del_tiempo_0910/CINDIV.txt", col_positions = especificacion_cindiv, col_types = cols(.default = "c"))
+
+# 2.4. LEER SERVICIO DOMÉSTICO (SD)
+# Según la descripción del INE: IDHOGAR(5)+N_SD(2)+SDJORNADA(1)+SDHORAS_HH(2)+SDHORAS_MM(2) = 12 caracteres antes.
+# Por tanto, SDPAGADO empieza en la 13.
+especificacion_sd <- fwf_cols(
+  IDHOGAR  = c(1, 5),
+  SDPAGADO = c(13, 13)
+)
+sd_limpio <- read_fwf("C:/Users/shalo/OneDrive/Documents/Capstone Google/empleo_del_tiempo_0910/SD.txt", col_positions = especificacion_sd, col_types = cols(.default = "c")) %>%
+  group_by(IDHOGAR) %>%
+  summarize(Ayuda_Externa = if_else(any(SDPAGADO == "1"), "Con Servicio", "Sin Servicio"), .groups = "drop")
+
+# 3. UNIR TODO *ANTES* DE SUMARIZAR 
+analisis_final <- diario2 %>%
+  left_join(mhogar_limpio, by = c("IDHOGAR", "NPERS")) %>%
+  left_join(cindiv_limpio, by = c("IDHOGAR", "NPERS")) %>%
+  left_join(sd_limpio, by = "IDHOGAR") %>% # Aquí IDHOGAR todavía existe
+  filter(APRIN == "938") %>% # Solo cuidados de niños
+  mutate(
+    PESO = as.numeric(FACTORF) / 10^10,
+    # Si el hogar no está en la tabla SD, asumimos que no tiene servicio
+    Ayuda_Externa = replace_na(Ayuda_Externa, "Sin Servicio")
+  ) %>%
+  group_by(SEXO, TRABAJO, Ayuda_Externa) %>%
+  summarize(
+    total_horas_espana = sum(PESO * 10, na.rm = TRUE) / 60,
+    .groups = 'drop'
+  )
+
+# 3.1. CAMBIAR LOS CÓDIGOS POR DESCRIPCIONES
+datos_finales_limpios <- analisis_final %>%
+  mutate(
+    Situacion_Laboral = case_when(
+      TRABAJO == "1" ~ "Ocupado/a",
+      TRABAJO == "6" ~ "No trabaja",
+      TRUE ~ "Otras situaciones"
+    )
+  )
+
+print(datos_finales_limpios)
+
+```
+
+## 3. Resultados Principales y Análisis Visual
+
+### 3.1. Volumen Total de Trabajo de Cuidados
+El primer análisis compara el total de horas diarias que hombres y mujeres dedican al cuidado infantil, diferenciando si el hogar cuenta con ayuda externa.
+
+```{r graficos, echo=FALSE}
+# 4.1. Análisis de la doble jornada.
+# 4.1.1. Preparamos los datos con nombres claros para el eje X
+datos_grafico <- analisis_final %>%
+  mutate(
+    Situacion = case_when(
+      TRABAJO == "1" ~ "Trabaja fuera",
+      TRABAJO == "6" ~ "No trabaja fuera",
+      TRUE ~ "Otras sit."
+    )
+  ) %>%
+  filter(Situacion != "Otras sit.") 
+
+# 4.1.2. Creamos el gráfico
+ggplot(datos_grafico, aes(x = Situacion, y = total_horas_espana, fill = SEXO)) +
+  geom_bar(stat = "identity", position = "dodge", color = "white") +
+  facet_wrap(~Ayuda_Externa) + 
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Cuidado de Niños: La Brecha por Sexo y Ayuda Externa",
+    subtitle = "Horas totales diarias en España según situación laboral y servicio doméstico",
+    x = "Situación Laboral",
+    y = "Horas Diarias Totales (España)",
+    fill = "Sexo"
+  ) +
+  scale_fill_manual(values = c("Mujer" = "#d62728", "Varón" = "#1f77b4")) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_rect(fill = "gray95"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### 3.2. Distribución Horaria (La Carga Mental y Temporal)
+A continuación, se muestra el "ritmo" del cuidado a lo largo de las 24 horas del día. Este gráfico de densidad revela los picos de actividad según el sexo.
+
+```{r grafico2, echo=FALSE}
+# 4.2. Gráfico de "Curvas de Cuidado" - Densidad
+# 4.2.1. Volvemos a leer el diario asegurándonos de que INTERVALO esté ahí
+especificacion_diario_tiempo <- fwf_cols(
+  IDHOGAR   = c(1, 5),   
+  NPERS     = c(6, 7),   
+  INTERVALO = c(10, 12), # Esta es la columna que nos faltaba para la hora
+  APRIN     = c(13, 15), 
+  FACTORF   = c(29, 44)
+)
+
+diario_tiempo <- read_fwf("C:/Users/shalo/OneDrive/Documents/Capstone Google/empleo_del_tiempo_0910/DIARIO2.txt", 
+                          col_positions = especificacion_diario_tiempo, 
+                          col_types = cols(.default = "c"))
+
+# 4.2.2. Preparamos los datos para el gráfico
+datos_densidad <- diario_tiempo %>%
+  left_join(mhogar_limpio, by = c("IDHOGAR", "NPERS")) %>%
+  filter(APRIN == "938") %>% 
+  mutate(
+    # Convertimos el intervalo (1-144) a la hora del día (0-24)
+    Hora = as.numeric(INTERVALO) * 10 / 60,
+    PESO = as.numeric(FACTORF) / 10^10
+  )
+
+# 4.2.3. El Gráfico de Densidad (Histograma suavizado)
+ggplot(datos_densidad, aes(x = Hora, fill = SEXO, weight = PESO)) +
+  geom_density(alpha = 0.6, color = "white") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c("Mujer" = "#d62728", "Varón" = "#1f77b4")) +
+  scale_x_continuous(breaks = seq(0, 24, by = 2), limits = c(0, 24)) +
+  labs(
+    title = "Distribución Horaria del Cuidado de Niños",
+    subtitle = "La brecha de sexo a lo largo de las 24 horas del día",
+    x = "Hora del Día (desde las 00:00)",
+    y = "Intensidad de la actividad",
+    fill = "Sexo"
+  ) +
+  theme(legend.position = "bottom")
+
+```
+
+### 3.3. Edad de los cuidadores
+¿A qué edades se concentra el esfuerzo del cuidado?
+
+```{r grafico3, echo=FALSE}
+# 4.3. Boxplot: Distribución de Edad por Sexo
+
+# 4.3.1. Preparamos los datos de edad (asegurándonos de que sea numérica)
+datos_edad <- diario_tiempo %>%
+  left_join(mhogar_limpio, by = c("IDHOGAR", "NPERS")) %>%
+  filter(APRIN == "938") %>%
+  mutate(EDAD = as.numeric(EDAD))
+
+# 4.3.2. Creamos el Boxplot
+ggplot(datos_edad, aes(x = SEXO, y = EDAD, fill = SEXO)) +
+  geom_boxplot(alpha = 0.7, outlier.color = "gray70") +
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 3, color = "black") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c("Mujer" = "#d62728", "Varón" = "#1f77b4")) +
+  labs(
+    title = "Edad de las personas que cuidan niños",
+    subtitle = "Comparativa por sexo (el punto negro es la edad media)",
+    x = "Sexo",
+    y = "Edad (años)",
+    fill = "Sexo"
+  ) +
+  theme(legend.position = "none")
+
+```
+
+### 3.4. Análisis Estadístico de la Edad
+Para complementar el gráfico anterior, calculamos la edad media y la desviación típica de las personas que realizan cuidados:
+
+```{r tabla_edad, echo=FALSE}
+datos_edad %>%
+  group_by(SEXO) %>%
+  summarize(
+    Edad_Media = round(mean(EDAD, na.rm = TRUE), 1),
+    Edad_Minima = min(EDAD, na.rm = TRUE),
+    Edad_Maxima = max(EDAD, na.rm = TRUE),
+    N_Casos = n()
+  ) %>%
+  knitr::kable(caption = "Estadísticos descriptivos de edad por sexo")
+
+```
+
+## 4. Conclusiones
+Tras el análisis de los microdatos, se extraen las siguientes conclusiones fundamentales:
+
+- Diferenciación por Sexo: El sexo es la variable con mayor poder explicativo sobre la carga de cuidados; las mujeres asumen un volumen de horas significativamente mayor en todos los niveles laborales analizados.
+
+- La Insuficiencia del Servicio Doméstico: El acceso a servicio doméstico pagado reduce la carga absoluta, pero no elimina la brecha de sexo, sugiriendo que la gestión y el cuidado directo siguen teniendo una fuerte asignación biológica y social femenina.
+
+- Sostenibilidad de la Conciliación: Las mujeres que trabajan fuera ("Doble Jornada") asumen picos de actividad vespertina que superan a los varones que no trabajan fuera, evidenciando una tensión estructural en la conciliación.
+
+## 5. Referencias Bibliográficas
+
+* **Instituto Nacional de Estadística (INE).** (2010). *Encuesta de Empleo del Tiempo (EET) 2009-2010. Microdatos y Metodología.* Recuperado de [ine.es](https://www.ine.es)
+* **Metodología de la EET:** El análisis se basa en la clasificación de actividades CINDIV y el registro de diarios (DIARIO2) donde el código **938** corresponde específicamente a 'Cuidado de niños'.
+* **Tratamiento de Datos:** La diferenciación de resultados se ha realizado bajo la premisa de que el **sexo** es la variable biológica y demográfica fundamental que estructura la carga de cuidados en los hogares españoles.
